@@ -21,10 +21,18 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# ===== 切換設定：改為 "ollama" 即可使用本地模型 =====
-USE_PROVIDER = "ollama"  # "openai" 或 "ollama"
-OLLAMA_MODEL = "llama3"
+# ===== 設定 =====
+USE_EMBED_PROVIDER = "ollama"  # embedding 用的 provider: "openai" 或 "ollama"
 OLLAMA_EMBED_MODEL = "nomic-embed-text"
+
+# 可供使用者在 UI 切換的模型清單 (顯示名稱 -> (provider, model_id))
+MODEL_CHOICES = {
+    "llama3 (Ollama)": ("ollama", "llama3"),
+    "gemma3 (Ollama)": ("ollama", "gemma3"),
+    "gpt-4o-mini (OpenAI)": ("openai", "gpt-4o-mini"),
+    "gpt-4o (OpenAI)": ("openai", "gpt-4o"),
+}
+DEFAULT_MODEL = "llama3 (Ollama)"
 
 folder = "personal_information"
 loader_kwargs = {}
@@ -39,11 +47,9 @@ print(f"Total number of chunks: {len(chunks)}")
 
 db_name = "personal_information_vector_db"
 
-if USE_PROVIDER == "openai":
-    MODEL = "gpt-4o-mini"
+if USE_EMBED_PROVIDER == "openai":
     embeddings = OpenAIEmbeddings()
 else:
-    MODEL = OLLAMA_MODEL
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
 
 if os.path.exists(db_name):
@@ -59,21 +65,35 @@ sample_embedding = collection.get(limit = 1, include = ["embeddings"])["embeddin
 dimensions = len(sample_embedding)
 print(f"There are {count:,} vectors with {dimensions:,} dimensions in the vector store")
 
-if USE_PROVIDER == "openai":
-    llm = ChatOpenAI(temperature=0.7, model_name=MODEL)
-else:
-    llm = ChatOllama(temperature=0.7, model=MODEL)
-memory = ConversationBufferMemory(memory_key = "chat_history", return_messages = True)
 retriever = vectorstore.as_retriever(search_kwargs = {"k":25})
-conversation_chain = ConversationalRetrievalChain.from_llm(llm = llm, retriever = retriever, memory = memory)
 
-def chat(message, _history):
-    result = conversation_chain.invoke({"question": message})
+def build_chain(provider, model_id):
+    if provider == "openai":
+        llm = ChatOpenAI(temperature=0.7, model_name=model_id)
+    else:
+        llm = ChatOllama(temperature=0.7, model=model_id)
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    return ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)
+
+# 用 dict 追蹤目前的 chain 與模型名稱
+current = {"model_name": DEFAULT_MODEL, "chain": build_chain(*MODEL_CHOICES[DEFAULT_MODEL])}
+
+def chat(message, _history, model_name):
+    if model_name != current["model_name"]:
+        current["chain"] = build_chain(*MODEL_CHOICES[model_name])
+        current["model_name"] = model_name
+    result = current["chain"].invoke({"question": message})
     return result["answer"]
 
 if __name__ == "__main__":
+    model_dropdown = gr.Dropdown(
+        choices=list(MODEL_CHOICES.keys()),
+        value=DEFAULT_MODEL,
+        label="選擇模型",
+    )
     gr.ChatInterface(
         fn=chat,
         title="個人資訊問答系統",
         description="根據個人文件回答問題，請輸入你的問題。",
+        additional_inputs=[model_dropdown],
     ).launch()
