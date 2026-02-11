@@ -22,7 +22,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 load_dotenv()
 
 # ===== 切換設定：改為 "ollama" 即可使用本地模型 =====
-USE_PROVIDER = "openai"  # "openai" 或 "ollama"
+USE_PROVIDER = "ollama"  # "openai" 或 "ollama"
 OLLAMA_MODEL = "llama3"
 OLLAMA_EMBED_MODEL = "nomic-embed-text"
 
@@ -67,7 +67,13 @@ memory = ConversationBufferMemory(memory_key = "chat_history", return_messages =
 retriever = vectorstore.as_retriever(search_kwargs = {"k":25})
 conversation_chain = ConversationalRetrievalChain.from_llm(llm = llm, retriever = retriever, memory = memory)
 
+def chat(message, _history):
+    result = conversation_chain.invoke({"question": message})
+    return result["answer"]
+
 if __name__ == "__main__":
-    query = "請問碩士讀哪裡?"
-    result = conversation_chain.invoke({"question": query})
-    print(result["answer"])
+    gr.ChatInterface(
+        fn=chat,
+        title="個人資訊問答系統",
+        description="根據個人文件回答問題，請輸入你的問題。",
+    ).launch()
