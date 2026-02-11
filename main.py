@@ -8,6 +8,7 @@ import gradio as gr
 from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_chroma import Chroma
@@ -69,13 +70,24 @@ print(f"There are {collection.count():,} vectors with {len(sample_embedding):,} 
 
 retriever = vectorstore.as_retriever(search_kwargs = {"k":25})
 
+qa_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "你是一個專業的個人資訊問答助手，請根據以下提供的文件內容回答問題。\n"
+     "請一律使用繁體中文回答。如果文件中沒有相關資訊，請誠實告知。\n\n"
+     "{context}"),
+    ("human", "{question}"),
+])
+
 def build_chain(provider, model_id):
     if provider == "openai":
         llm = ChatOpenAI(temperature=0.7, model_name=model_id)
     else:
         llm = ChatOllama(temperature=0.7, model=model_id)
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    return ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)
+    return ConversationalRetrievalChain.from_llm(
+        llm=llm, retriever=retriever, memory=memory,
+        combine_docs_chain_kwargs={"prompt": qa_prompt},
+    )
 
 # 用 dict 追蹤目前的 chain 與模型名稱
 current = {"model_name": DEFAULT_MODEL, "chain": build_chain(*MODEL_CHOICES[DEFAULT_MODEL])}
