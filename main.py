@@ -35,16 +35,6 @@ MODEL_CHOICES = {
 DEFAULT_MODEL = "llama3 (Ollama)"
 
 folder = "personal_information"
-loader_kwargs = {}
-loader = DirectoryLoader(folder, glob = "*.pdf", loader_cls = PyPDFLoader, loader_kwargs = loader_kwargs)
-folder_doc = loader.load()
-
-documents = folder_doc
-text_splitter = RecursiveCharacterTextSplitter(chunk_size = 300, chunk_overlap = 100)
-chunks = text_splitter.split_documents(documents)
-print(f"Total number of documents: {len(documents)}")
-print(f"Total number of chunks: {len(chunks)}")
-
 db_name = "personal_information_vector_db"
 
 if USE_EMBED_PROVIDER == "openai":
@@ -52,18 +42,30 @@ if USE_EMBED_PROVIDER == "openai":
 else:
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
 
+# 若 DB 已存在且有資料，直接載入；否則才讀取文件並建立
+vectorstore = None
 if os.path.exists(db_name):
-    Chroma(persist_directory = db_name, embedding_function = embeddings).delete_collection()
+    vectorstore = Chroma(persist_directory=db_name, embedding_function=embeddings)
+    count = vectorstore._collection.count()
+    if count > 0:
+        print(f"Loaded existing vectorstore with {count} documents")
+    else:
+        print("DB exists but is empty, rebuilding...")
+        vectorstore.delete_collection()
+        vectorstore = None
 
-vectorstore = Chroma.from_documents(documents = chunks, embedding = embeddings, persist_directory = db_name)
-print(f"Vectorstore created with {vectorstore._collection.count()} documents")
+if vectorstore is None:
+    loader = DirectoryLoader(folder, glob="*.pdf", loader_cls=PyPDFLoader)
+    documents = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
+    chunks = text_splitter.split_documents(documents)
+    print(f"Total documents: {len(documents)}, chunks: {len(chunks)}")
+    vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)
+    print(f"Vectorstore created with {vectorstore._collection.count()} documents")
 
 collection = vectorstore._collection
-count = collection.count()
-
-sample_embedding = collection.get(limit = 1, include = ["embeddings"])["embeddings"][0]
-dimensions = len(sample_embedding)
-print(f"There are {count:,} vectors with {dimensions:,} dimensions in the vector store")
+sample_embedding = collection.get(limit=1, include=["embeddings"])["embeddings"][0]
+print(f"There are {collection.count():,} vectors with {len(sample_embedding):,} dimensions")
 
 retriever = vectorstore.as_retriever(search_kwargs = {"k":25})
 
