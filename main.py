@@ -26,14 +26,37 @@ load_dotenv()
 USE_EMBED_PROVIDER = "ollama"  # embedding 用的 provider: "openai" 或 "ollama"
 OLLAMA_EMBED_MODEL = "nomic-embed-text"
 
-# 可供使用者在 UI 切換的模型清單 (顯示名稱 -> (provider, model_id))
-MODEL_CHOICES = {
-    "llama3 (Ollama)": ("ollama", "llama3"),
-    "gemma3 (Ollama)": ("ollama", "gemma3"),
-    "gpt-4o-mini (OpenAI)": ("openai", "gpt-4o-mini"),
-    "gpt-4o (OpenAI)": ("openai", "gpt-4o"),
+# Prompt 模板：依模型的語言能力選用
+PROMPTS = {
+    "zh": ChatPromptTemplate.from_messages([
+        ("system",
+         "你是一個專業的個人資訊問答助手。\n"
+         "請根據以下提供的文件內容，使用繁體中文回答使用者的問題。\n"
+         "如果文件中沒有相關資訊，請誠實告知。\n\n"
+         "{context}"),
+        ("human", "{question}"),
+    ]),
+    "en": ChatPromptTemplate.from_messages([
+        ("system",
+         "You are a professional personal information QA assistant. "
+         "You MUST answer ONLY in Traditional Chinese (繁體中文). "
+         "Never respond in English. "
+         "Answer the user's question based on the following context. "
+         "If the context does not contain relevant information, honestly say so in Traditional Chinese.\n\n"
+         "{context}"),
+        ("human", "{question}"),
+    ]),
 }
-DEFAULT_MODEL = "llama3 (Ollama)"
+
+# 可供使用者在 UI 切換的模型清單 (顯示名稱 -> (provider, model_id, prompt_key))
+MODEL_CHOICES = {
+    "qwen2.5 (Ollama)": ("ollama", "qwen2.5", "zh"),
+    "llama3 (Ollama)": ("ollama", "llama3", "en"),
+    "gemma3 (Ollama)": ("ollama", "gemma3", "en"),
+    "gpt-4o-mini (OpenAI)": ("openai", "gpt-4o-mini", "zh"),
+    "gpt-4o (OpenAI)": ("openai", "gpt-4o", "zh"),
+}
+DEFAULT_MODEL = "qwen2.5 (Ollama)"
 
 folder = "personal_information"
 db_name = "personal_information_vector_db"
@@ -70,15 +93,7 @@ print(f"There are {collection.count():,} vectors with {len(sample_embedding):,} 
 
 retriever = vectorstore.as_retriever(search_kwargs = {"k":25})
 
-qa_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "你是一個專業的個人資訊問答助手，請根據以下提供的文件內容回答問題。\n"
-     "請一律使用繁體中文回答。如果文件中沒有相關資訊，請誠實告知。\n\n"
-     "{context}"),
-    ("human", "{question}"),
-])
-
-def build_chain(provider, model_id):
+def build_chain(provider, model_id, prompt_key):
     if provider == "openai":
         llm = ChatOpenAI(temperature=0.7, model_name=model_id)
     else:
@@ -86,7 +101,7 @@ def build_chain(provider, model_id):
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     return ConversationalRetrievalChain.from_llm(
         llm=llm, retriever=retriever, memory=memory,
-        combine_docs_chain_kwargs={"prompt": qa_prompt},
+        combine_docs_chain_kwargs={"prompt": PROMPTS[prompt_key]},
     )
 
 # 用 dict 追蹤目前的 chain 與模型名稱
