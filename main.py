@@ -1,6 +1,7 @@
 # imports
 import os
 import glob
+import logging
 from dotenv import load_dotenv
 import gradio as gr
 
@@ -9,6 +10,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader, Py
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_chroma import Chroma
@@ -21,6 +23,32 @@ from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 load_dotenv()
+
+# ===== Logger 設定 =====
+os.makedirs("log", exist_ok=True)
+logging.basicConfig(
+    filename=os.path.join("log", "qa_log.log"),
+    encoding="utf-8",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+class PromptLogHandler(BaseCallbackHandler):
+    """攔截每次送入 LLM 的完整 prompt 並寫入 log。"""
+    def __init__(self):
+        self.call_count = 0
+
+    def on_chat_model_start(self, _serialized, messages, **_kwargs):
+        self.call_count += 1
+        # 第 1 次呼叫 = 濃縮問題，第 2 次 = QA 回答
+        stage = "濃縮問題" if self.call_count % 2 == 1 else "QA 回答"
+        logger.info("=== 送入模型的 Prompt（%s階段）===", stage)
+        for msg in messages[0]:
+            logger.info("[%s] %s", msg.type, msg.content)
+
+prompt_log_handler = PromptLogHandler()
 
 # ===== 設定 =====
 USE_EMBED_PROVIDER = "ollama"  # embedding 用的 provider: "openai" 或 "ollama"
@@ -102,6 +130,7 @@ def build_chain(provider, model_id, prompt_key):
     return ConversationalRetrievalChain.from_llm(
         llm=llm, retriever=retriever, memory=memory,
         combine_docs_chain_kwargs={"prompt": PROMPTS[prompt_key]},
+        return_source_documents=True,
     )
 
 # 用 dict 追蹤目前的 chain 與模型名稱
@@ -111,7 +140,26 @@ def chat(message, _history, model_name):
     if model_name != current["model_name"]:
         current["chain"] = build_chain(*MODEL_CHOICES[model_name])
         current["model_name"] = model_name
-    result = current["chain"].invoke({"question": message})
+        logger.info("模型切換為: %s", model_name)
+
+    prompt_key = MODEL_CHOICES[model_name][2]
+    logger.info("使用者問題: %s", message)
+    logger.info("使用模型: %s | Prompt: %s", model_name, prompt_key)
+
+    result = current["chain"].invoke(
+        {"question": message},
+        config={"callbacks": [prompt_log_handler]},
+    )
+
+    # 記錄檢索到的文件片段
+    for i, doc in enumerate(result.get("source_documents", []), 1):
+        source = doc.metadata.get("source", "unknown")
+        page = doc.metadata.get("page", "?")
+        logger.info("檢索文件 [%d] (來源: %s, 頁碼: %s): %s", i, source, page, doc.page_content[:200])
+
+    logger.info("模型回答: %s", result["answer"])
+    logger.info("-" * 60)
+
     return result["answer"]
 
 if __name__ == "__main__":

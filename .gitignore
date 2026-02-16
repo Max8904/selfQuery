@@ -1,4 +1,5 @@
 .vscode/
 personal_information/
 personal_information_vector_db/
+log/
 .env
