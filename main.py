@@ -25,9 +25,12 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 load_dotenv()
 
 # ===== Logger 設定 =====
+from datetime import datetime
+
 os.makedirs("log", exist_ok=True)
+log_filename = f"qa_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logging.basicConfig(
-    filename=os.path.join("log", "qa_log.log"),
+    filename=os.path.join("log", log_filename),
     encoding="utf-8",
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -126,7 +129,7 @@ def build_chain(provider, model_id, prompt_key):
         llm = ChatOpenAI(temperature=0.7, model_name=model_id)
     else:
         llm = ChatOllama(temperature=0.7, model=model_id)
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True, output_key="answer")
     return ConversationalRetrievalChain.from_llm(
         llm=llm, retriever=retriever, memory=memory,
         combine_docs_chain_kwargs={"prompt": PROMPTS[prompt_key]},
@@ -146,10 +149,17 @@ def chat(message, _history, model_name):
     logger.info("使用者問題: %s", message)
     logger.info("使用模型: %s | Prompt: %s", model_name, prompt_key)
 
-    result = current["chain"].invoke(
-        {"question": message},
-        config={"callbacks": [prompt_log_handler]},
-    )
+    try:
+        result = current["chain"].invoke(
+            {"question": message},
+            config={"callbacks": [prompt_log_handler]},
+        )
+    except ConnectionError:
+        logger.error("無法連線到 Ollama 服務")
+        return "⚠️ 無法連線到 Ollama，請確認 Ollama 已啟動（執行 `ollama serve`）。"
+    except Exception as e:
+        logger.error("呼叫模型時發生錯誤: %s", e)
+        return f"⚠️ 發生錯誤：{e}"
 
     # 記錄檢索到的文件片段
     for i, doc in enumerate(result.get("source_documents", []), 1):
