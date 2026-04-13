@@ -1,12 +1,19 @@
 # ===== 內建模組與環境變數載入 =====
 import os
+import sys
 import glob
 import logging
 from dotenv import load_dotenv
 import gradio as gr
 
+# 強制設定終端機輸出為 UTF-8 (解決 Windows 亂碼)
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
+
 # ===== LangChain 生態系、圖表與向量資料庫載入 =====
-from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyPDFLoader
+from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -41,17 +48,15 @@ logger = logging.getLogger(__name__)
 
 class PromptLogHandler(BaseCallbackHandler):
     """攔截每次送入 LLM 的完整 prompt 並寫入 log。"""
-    def __init__(self):
-        self.call_count = 0
-
     def on_chat_model_start(self, _serialized, messages, **_kwargs):
-        self.call_count += 1
-        # LangChain ConversationalRetrievalChain 會有兩次呼叫：
-        # 第 1 次呼叫 = 濃縮問題，第 2 次 = QA 回答
-        stage = "濃縮問題" if self.call_count % 2 == 1 else "QA 回答"
-        logger.info("=== 送入模型的 Prompt（%s階段）===", stage)
+        logger.info("=== 送入模型的 Prompt ===")
         for msg in messages[0]:
-            logger.info("[%s] %s", msg.type, msg.content)
+            if msg.type == "system":
+                # System Message 通常包含龐大的檢索文件({context})，將其截斷以保持 Log 乾淨
+                content_preview = msg.content.replace('\n', ' ')[:100]
+                logger.info("[%s] %s ... (已省略過長的 context 內容)", msg.type, content_preview)
+            else:
+                logger.info("[%s] %s", msg.type, msg.content)
 
 prompt_log_handler = PromptLogHandler()
 
@@ -118,7 +123,7 @@ if os.path.exists(db_name):
 # 若無現存的資料庫或為空，則開始讀取文件進行重建
 if vectorstore is None:
     # 使用 DirectoryLoader 尋找資料夾底下所有 PDF 並讀取
-    loader = DirectoryLoader(folder, glob="*.pdf", loader_cls=PyPDFLoader)
+    loader = DirectoryLoader(folder, glob="*.pdf", loader_cls=PyMuPDFLoader)
     documents = loader.load()
     # 設定文件切割器，每個區塊 300 個字元，保留 100 字元的重疊以防語意斷層
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
@@ -182,10 +187,14 @@ def chat(message, _history, model_name):
         return f"發生錯誤：{e}"
 
     # 記錄檢索到的文件片段
+    logger.info("=== 檢索到的參考文件 ===")
     for i, doc in enumerate(result.get("source_documents", []), 1):
-        source = doc.metadata.get("source", "unknown")
+        # 只取檔名，避免絕對路徑過長
+        source = os.path.basename(doc.metadata.get("source", "unknown"))
         page = doc.metadata.get("page", "?")
-        logger.info("檢索文件 [%d] (來源: %s, 頁碼: %s):\n%s", i, source, page, doc.page_content[:200])
+        # 移除換行符號並截短，讓 log 濃縮成一行好閱讀
+        content_preview = doc.page_content.replace('\n', ' ')[:80]
+        logger.info("文件 [%d] | 來源: %s (頁: %s) | 內容: %s...", i, source, page, content_preview)
 
     logger.info("模型回答: %s", result["answer"])
     logger.info("-" * 60)
