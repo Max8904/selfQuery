@@ -3,6 +3,7 @@ import os
 import sys
 import glob
 import logging
+import re
 from dotenv import load_dotenv
 import gradio as gr
 
@@ -70,6 +71,7 @@ PROMPTS = {
         ("system",
          "你是一個專業的個人資訊問答助手。\n"
          "請根據以下提供的文件內容，使用繁體中文回答使用者的問題。\n"
+         "回答時請在語句中或結尾處，根據參考的文件使用 [文件名, 頁碼] 格式標註來源。\n"
          "如果文件中沒有相關資訊，請誠實告知。\n\n"
          "{context}"),
         ("human", "{question}"),
@@ -80,6 +82,7 @@ PROMPTS = {
          "You MUST answer ONLY in Traditional Chinese (繁體中文). "
          "Never respond in English. "
          "Answer the user's question based on the following context. "
+         "Cite sources using the [filename, page] format within or at the end of your sentences. "
          "If the context does not contain relevant information, honestly say so in Traditional Chinese.\n\n"
          "{context}"),
         ("human", "{question}"),
@@ -186,20 +189,48 @@ def chat(message, _history, model_name):
         logger.error("呼叫模型時發生錯誤: %s", e)
         return f"發生錯誤：{e}"
 
-    # 記錄檢索到的文件片段
+    # 記錄檢索到的文件片段並整理成參考清單
     logger.info("=== 檢索到的參考文件 ===")
+    reference_list = []
+    seen_refs = set()
     for i, doc in enumerate(result.get("source_documents", []), 1):
-        # 只取檔名，避免絕對路徑過長
         source = os.path.basename(doc.metadata.get("source", "unknown"))
-        page = doc.metadata.get("page", "?")
-        # 移除換行符號並截短，讓 log 濃縮成一行好閱讀
-        content_preview = doc.page_content.replace('\n', ' ')[:80]
-        logger.info("文件 [%d] | 來源: %s (頁: %s) | 內容: %s...", i, source, page, content_preview)
+        page = doc.metadata.get("page", 0) + 1  # 通常 PDF 頁碼從 0 開始，顯示給使用者時 +1
+        
+        # 取得一小段預覽內容 (移除換行並取前 60 字)
+        snippet = doc.page_content.replace('\n', ' ').strip()[:60]
+        
+        # 建立唯一標識，避免重複列出完全相同的來源頁面
+        ref_id = f"{source}, {page}"
+        if ref_id not in seen_refs:
+            # 套用與文內引用一致的樣式 **`[檔名, 頁碼]`**
+            styled_ref = f"**`[{ref_id}]`**"
+            reference_list.append(f"{styled_ref} {snippet}...")
+            seen_refs.add(ref_id)
+            
+        logger.info("文件 [%d] | 來源: %s (頁: %s) | 內容: %s...", i, source, page, snippet[:40])
+
+    # 移除模型回答結尾可能存在的多餘換行
+    answer_text = result["answer"].strip()
+    
+    # 使用最寬鬆的正規表示法尋找任何 [...] 格式
+    # 只要中括號內有文字（不論是否有逗號或數字），都強制進行標註
+    answer_text = re.sub(
+        r'(\[[^\]\n]+\])', 
+        r'**`\1`**', 
+        answer_text
+    )
+
+    if reference_list:
+        # 直接使用加粗文字作為分隔，並串接加工後的 answer_text
+        final_answer = answer_text + "\n\n**【參考來源】**\n" + "\n".join([f"- {ref}" for ref in reference_list])
+    else:
+        final_answer = answer_text
 
     logger.info("模型回答: %s", result["answer"])
     logger.info("-" * 60)
 
-    return result["answer"]
+    return final_answer
 
 if __name__ == "__main__":
     # 建立 Gradio 下拉選單元件，讓使用者可切換模型
@@ -213,4 +244,4 @@ if __name__ == "__main__":
         title="個人資訊問答系統",
         description="根據個人文件回答問題，請輸入你的問題。",
         additional_inputs=[model_dropdown],
-    ).launch()
+    ).launch(height=800)
