@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 import gradio as gr
 
 # 強制設定終端機輸出為 UTF-8 (解決 Windows 亂碼)
-if sys.stdout.encoding != 'utf-8':
+if hasattr(sys.stdout, 'reconfigure') and sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
-if sys.stderr.encoding != 'utf-8':
+if hasattr(sys.stderr, 'reconfigure') and sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
 # ===== LangChain 生態系、圖表與向量資料庫載入 =====
