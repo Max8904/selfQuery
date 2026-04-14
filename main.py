@@ -4,6 +4,8 @@ import sys
 import glob
 import logging
 import re
+import hashlib
+import shutil
 from dotenv import load_dotenv
 import gradio as gr
 
@@ -147,38 +149,72 @@ DEFAULT_MODEL = "qwen2.5 (Ollama)"
 folder = "personal_information"
 db_name = "personal_information_vector_db"
 
-# 根據設定初始化 Embedding 模型 (負責將文字轉化為向量)
+def get_folder_fingerprint(folder_path):
+    """計算資料夾內所有 PDF 檔案的指紋 (檔名 + 修改時間 + 檔案大小)"""
+    files = sorted(glob.glob(os.path.join(folder_path, "*.pdf")))
+    state = []
+    for f in files:
+        stats = os.stat(f)
+        state.append((os.path.basename(f), stats.st_mtime, stats.st_size))
+    return hashlib.md5(str(state).encode()).hexdigest()
+
+# 根據設定初始化 Embedding 模型
 if USE_EMBED_PROVIDER == "openai":
     embeddings = OpenAIEmbeddings()
 else:
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
 
-# ===== 向量資料庫 (ChromaDB) 初始化 =====
-# 若 DB 已存在且有資料，直接載入；否則才讀取文件並建立
-vectorstore = None
-if os.path.exists(db_name):
-    # 嘗試載入本地的 ChromaDB
-    vectorstore = Chroma(persist_directory=db_name, embedding_function=embeddings)
-    count = vectorstore._collection.count()
-    if count > 0:
-        print(f"Loaded existing vectorstore with {count} chunks")
-    else:
-        print("DB exists but is empty, rebuilding...")
-        vectorstore.delete_collection()
-        vectorstore = None
+# ===== 向量資料庫 (ChromaDB) 初始化 (具備自動更新功能) =====
+current_fingerprint = get_folder_fingerprint(folder)
+fingerprint_file = os.path.join(db_name, "fingerprint.txt")
 
-# 若無現存的資料庫或為空，則開始讀取文件進行重建
-if vectorstore is None:
+vectorstore = None
+rebuild_needed = False
+
+if os.path.exists(db_name):
+    # 檢查指紋檔案是否存在且內容是否匹配
+    if os.path.exists(fingerprint_file):
+        with open(fingerprint_file, "r") as f:
+            last_fingerprint = f.read().strip()
+        
+        if last_fingerprint == current_fingerprint:
+            print("Detected no changes in source files. Loading existing vectorstore...")
+            vectorstore = Chroma(persist_directory=db_name, embedding_function=embeddings)
+            # 如果資料庫是空的，也需要重建
+            if vectorstore._collection.count() == 0:
+                rebuild_needed = True
+        else:
+            print("Detected changes in source files. Preparing to rebuild...")
+            rebuild_needed = True
+    else:
+        print("Missing fingerprint file. Rebuilding for safety...")
+        rebuild_needed = True
+else:
+    rebuild_needed = True
+
+if rebuild_needed:
+    # 如果資料庫已存在但需要重建，先刪除舊目錄以確保清理乾淨
+    if os.path.exists(db_name):
+        shutil.rmtree(db_name)
+    
+    os.makedirs(db_name, exist_ok=True)
+    
     # 使用 DirectoryLoader 尋找資料夾底下所有 PDF 並讀取
     loader = DirectoryLoader(folder, glob="*.pdf", loader_cls=PyMuPDFLoader)
     documents = loader.load()
-    # 設定文件切割器，每個區塊 300 個字元，保留 100 字元的重疊以防語意斷層
+    
+    # 設定文件切割器
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
     chunks = text_splitter.split_documents(documents)
     print(f"Total documents: {len(documents)}, chunks: {len(chunks)}")
+    
     # 將切割好的文件區塊轉換成向量並存入本地端 ChromaDB
     vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)
-    print(f"Vectorstore created with {vectorstore._collection.count()} chunks")
+    
+    # 寫入新指紋
+    with open(fingerprint_file, "w") as f:
+        f.write(current_fingerprint)
+    print(f"Vectorstore created/rebuilt with {vectorstore._collection.count()} chunks.")
 
 collection = vectorstore._collection
 sample_embedding = collection.get(limit=1, include=["embeddings"])["embeddings"][0]
