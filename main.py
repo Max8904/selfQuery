@@ -1,3 +1,6 @@
+# ===== 程式版本與環境設定 =====
+APP_VERSION = "1.1.0"
+
 # ===== 內建模組與環境變數載入 =====
 import os
 import sys
@@ -19,7 +22,14 @@ if hasattr(sys.stderr, 'reconfigure') and sys.stderr.encoding != 'utf-8':
 from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+
+# 這個模板決定了 LLM 看到的每段參考資料長什麼樣子
+DOC_TEMPLATE = PromptTemplate(
+    template="---文件片段---\n檔案名稱: {source}\n頁碼: {page}\n內文: {page_content}",
+    input_variables=["page_content", "source", "page"]
+)
+
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_ollama import OllamaEmbeddings, ChatOllama
@@ -117,8 +127,11 @@ PROMPTS = {
         ("system",
          "你是一個專業的個人資訊問答助手。\n"
          "請根據以下提供的文件內容，使用繁體中文回答使用者的問題。\n"
-         "回答時請在語句中或結尾處，根據參考的文件使用 [文件名, 頁碼] 格式標註來源。\n"
-         "如果文件中沒有相關資訊，請誠實告知。\n\n"
+         "【回答規則】\n"
+         "1. 必須在語句中或結尾處，根據參考的文件使用 [文件名, 頁碼] 格式標註來源。\n"
+         "2. 請只擷取檔案路徑中的「檔名」部分（例如：xxx.pdf）進行標註。\n"
+         "3. 如果文件中沒有相關資訊，請誠實告知。\n\n"
+         "以下為文件的內容：\n"
          "{context}"),
         ("human", "{question}"),
     ]),
@@ -128,8 +141,11 @@ PROMPTS = {
          "You MUST answer ONLY in Traditional Chinese (繁體中文). "
          "Never respond in English. "
          "Answer the user's question based on the following context. "
-         "Cite sources using the [filename, page] format within or at the end of your sentences. "
-         "If the context does not contain relevant information, honestly say so in Traditional Chinese.\n\n"
+         "【Rules】\n"
+         "1. Cite sources using the [filename, page] format within or at the end of your sentences.\n"
+         "2. Use only the 'filename' (e.g., xxx.pdf) from the provided source path.\n"
+         "3. If the context does not contain relevant information, honestly say so in Traditional Chinese.\n\n"
+         "The following is the content of the documents:\n"
          "{context}"),
         ("human", "{question}"),
     ]),
@@ -150,13 +166,14 @@ folder = "personal_information"
 db_name = "personal_information_vector_db"
 
 def get_folder_fingerprint(folder_path):
-    """計算資料夾內所有 PDF 檔案的指紋 (檔名 + 修改時間 + 檔案大小)"""
+    """計算資料夾內所有 PDF 檔案的指紋 (檔名 + 修改時間 + 檔案大小 + 版本號)"""
     files = sorted(glob.glob(os.path.join(folder_path, "*.pdf")))
     state = []
     for f in files:
         stats = os.stat(f)
         state.append((os.path.basename(f), stats.st_mtime, stats.st_size))
-    return hashlib.md5(str(state).encode()).hexdigest()
+    # 加入 APP_VERSION 確保程式版本更新時也會觸發重建
+    return hashlib.md5((str(state) + APP_VERSION).encode()).hexdigest()
 
 # 根據設定初始化 Embedding 模型
 if USE_EMBED_PROVIDER == "openai":
@@ -203,6 +220,12 @@ if rebuild_needed:
     loader = DirectoryLoader(folder, glob="*.pdf", loader_cls=PyMuPDFLoader)
     documents = loader.load()
     
+    # 預處理：1. 將所有文件的頁碼 +1 (從 0-indexed 改為 1-indexed)
+    #         2. 將 source 路徑清理為純檔名，避免 LLM 輸出完整路徑
+    for doc in documents:
+        doc.metadata["page"] = doc.metadata.get("page", 0) + 1
+        doc.metadata["source"] = os.path.basename(doc.metadata.get("source", "unknown"))
+
     # 設定文件切割器
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
     chunks = text_splitter.split_documents(documents)
@@ -237,7 +260,10 @@ def build_chain(provider, model_id, prompt_key):
     # 組合 LLM、檢索器、記憶體與 Prompt 模板
     return ConversationalRetrievalChain.from_llm(
         llm=llm, retriever=retriever, memory=memory,
-        combine_docs_chain_kwargs={"prompt": PROMPTS[prompt_key]},
+        combine_docs_chain_kwargs={
+            "prompt": PROMPTS[prompt_key],
+            "document_prompt": DOC_TEMPLATE
+        },
         return_source_documents=True,
     )
 
@@ -275,7 +301,8 @@ def chat(message, _history, model_name):
     seen_refs = set()
     for i, doc in enumerate(result.get("source_documents", []), 1):
         source = os.path.basename(doc.metadata.get("source", "unknown"))
-        page = doc.metadata.get("page", 0) + 1  # 通常 PDF 頁碼從 0 開始，顯示給使用者時 +1
+        # 由於我們在存入資料庫前已經將頁碼 +1，這裡直接讀取即可
+        page = doc.metadata.get("page", 1) 
         
         # 取得一小段預覽內容 (移除換行並取前 60 字)
         snippet = doc.page_content.replace('\n', ' ').strip()[:60]
