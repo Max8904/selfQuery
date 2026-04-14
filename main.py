@@ -35,17 +35,61 @@ load_dotenv()
 # ===== Logger 設定 =====
 from datetime import datetime
 
+# 定義 ANSI 顏色代碼
+class LogColors:
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    RESET = "\033[0m"
+
+class ColorFormatter(logging.Formatter):
+    """自訂顏色格式化器，根據不同的訊息內容或等級上色"""
+    FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+    
+    def format(self, record):
+        log_fmt = self.FORMAT
+        # 根據 Log 等級設定基本顏色
+        if record.levelno == logging.INFO:
+            color = LogColors.GREEN
+        elif record.levelno == logging.WARNING:
+            color = LogColors.YELLOW
+        elif record.levelno == logging.ERROR:
+            color = LogColors.RED
+        else:
+            color = LogColors.RESET
+
+        # 特殊處理內容：如果是 Prompt 或模型回答，給予特定顏色
+        msg = record.msg
+        if "=== 送入模型的 Prompt ===" in msg or "使用者問題:" in msg or msg.startswith("["):
+            color = LogColors.CYAN
+        elif "模型回答:" in msg:
+            color = LogColors.BLUE
+        elif "=== 檢索到的參考文件 ===" in msg or msg.startswith("文件 ["):
+            color = LogColors.YELLOW
+
+        formatter = logging.Formatter(f"{color}{log_fmt}{LogColors.RESET}", datefmt="%Y-%m-%d %H:%M:%S")
+        return formatter.format(record)
+
 os.makedirs("log", exist_ok=True)
 log_filename = f"qa_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-logging.basicConfig(
-    # 將 log 儲存至檔案，設定編碼為 utf-8 並定義格式
-    filename=os.path.join("log", log_filename),
-    encoding="utf-8",
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+
+# 建立 Logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# 檔案 Handler (現在也包含顏色代碼)
+file_handler = logging.FileHandler(os.path.join("log", log_filename), encoding="utf-8")
+file_handler.setFormatter(ColorFormatter())
+
+# 終端機 Handler (帶有顏色)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(ColorFormatter())
+
+# 加入 Handler
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 class PromptLogHandler(BaseCallbackHandler):
     """攔截每次送入 LLM 的完整 prompt 並寫入 log。"""
