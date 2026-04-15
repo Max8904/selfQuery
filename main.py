@@ -19,7 +19,7 @@ if hasattr(sys.stderr, 'reconfigure') and sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
 # ===== LangChain 生態系、圖表與向量資料庫載入 =====
-from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader
+from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader, UnstructuredPowerPointLoader, Docx2txtLoader, UnstructuredExcelLoader
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
@@ -166,8 +166,12 @@ folder = "personal_information"
 db_name = "personal_information_vector_db"
 
 def get_folder_fingerprint(folder_path):
-    """計算資料夾內所有 PDF 檔案的指紋 (檔名 + 修改時間 + 檔案大小 + 版本號)"""
-    files = sorted(glob.glob(os.path.join(folder_path, "*.pdf")))
+    """計算資料夾內所有 PDF、PPTX、DOCX 與 Excel 檔案的指紋 (檔名 + 修改時間 + 檔案大小 + 版本號)"""
+    files = []
+    for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
+        files.extend(glob.glob(os.path.join(folder_path, ext)))
+    files.sort()
+    
     state = []
     for f in files:
         stats = os.stat(f)
@@ -216,11 +220,26 @@ if rebuild_needed:
     
     os.makedirs(db_name, exist_ok=True)
     
-    # 使用 DirectoryLoader 尋找資料夾底下所有 PDF 並讀取
-    loader = DirectoryLoader(folder, glob="*.pdf", loader_cls=PyMuPDFLoader)
-    documents = loader.load()
+    # 建立多種格式的載入器配置
+    file_loaders = {
+        "*.pdf": PyMuPDFLoader,
+        "*.pptx": UnstructuredPowerPointLoader,
+        "*.docx": Docx2txtLoader,
+        "*.xlsx": UnstructuredExcelLoader,
+        "*.xls": UnstructuredExcelLoader,
+    }
+
+    documents = []
+    for glob_pattern, loader_cls in file_loaders.items():
+        try:
+            loader = DirectoryLoader(folder, glob=glob_pattern, loader_cls=loader_cls)
+            loaded_docs = loader.load()
+            documents.extend(loaded_docs)
+            print(f"Loaded {len(loaded_docs)} documents/pages matching {glob_pattern}")
+        except Exception as e:
+            print(f"Error loading {glob_pattern}: {e}")
     
-    # 預處理：1. 將所有文件的頁碼 +1 (從 0-indexed 改為 1-indexed)
+    # 預處理：1. 將所有文件的頁碼 +1 (從 0-indexed 改為 1-indexed)，若無頁碼預設為 1
     #         2. 將 source 路徑清理為純檔名，避免 LLM 輸出完整路徑
     for doc in documents:
         doc.metadata["page"] = doc.metadata.get("page", 0) + 1
