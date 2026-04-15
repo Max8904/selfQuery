@@ -1,0 +1,19 @@
+# 向量資料庫與文件處理設定
+vector_db:
+  chunk_size: 500       # 每個切片的最大字元數 (推薦 400~600)
+  chunk_overlap: 100    # 相鄰切片的重疊長度 (推薦為 chunk_size 的 10-20%)
+  db_name: "personal_information_vector_db"
+  folder: "personal_information"
+
+# 檢索與模型設定
+retriever:
+  k: 5                  # 每次檢索回傳的片段數量 (推薦 3~7)
+
+# 聊天介面設定
+chat:
+  default_model: "qwen2.5 (Ollama)"  # 啟動時預設選擇的模型
+
+# 模型供應商設定
+providers:
+  embed_provider: "ollama"  # "openai" 或 "ollama"
+  ollama_embed_model: "nomic-embed-text"

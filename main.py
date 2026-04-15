@@ -9,6 +9,7 @@ import logging
 import re
 import hashlib
 import shutil
+import yaml
 from dotenv import load_dotenv
 import gradio as gr
 
@@ -43,6 +44,10 @@ from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 load_dotenv()
+
+# ===== 讀取配置設定 (config.yaml) =====
+with open("config.yaml", "r", encoding="utf-8") as f:
+    config = yaml.safe_load(f)
 
 # ===== Logger 設定 =====
 from datetime import datetime
@@ -118,8 +123,8 @@ class PromptLogHandler(BaseCallbackHandler):
 prompt_log_handler = PromptLogHandler()
 
 # ===== 設定 =====
-USE_EMBED_PROVIDER = "ollama"  # embedding 用的 provider: "openai" 或 "ollama"
-OLLAMA_EMBED_MODEL = "nomic-embed-text"
+USE_EMBED_PROVIDER = config["providers"]["embed_provider"]
+OLLAMA_EMBED_MODEL = config["providers"]["ollama_embed_model"]
 
 # Prompt 模板：依模型的語言能力選用
 PROMPTS = {
@@ -159,14 +164,14 @@ MODEL_CHOICES = {
     "gpt-4o-mini (OpenAI)": ("openai", "gpt-4o-mini", "zh"),
     "gpt-4o (OpenAI)": ("openai", "gpt-4o", "zh"),
 }
-DEFAULT_MODEL = "qwen2.5 (Ollama)"
+DEFAULT_MODEL = config["chat"]["default_model"]
 
 # 設定文件資料夾與向量資料庫儲存的資料夾名稱
-folder = "personal_information"
-db_name = "personal_information_vector_db"
+folder = config["vector_db"]["folder"]
+db_name = config["vector_db"]["db_name"]
 
-def get_folder_fingerprint(folder_path):
-    """計算資料夾內所有 PDF、PPTX、DOCX 與 Excel 檔案的指紋 (檔名 + 修改時間 + 檔案大小 + 版本號)"""
+def get_folder_fingerprint(folder_path, chunk_size, chunk_overlap):
+    """計算資料夾內容與切割設定的指紋 (檔案狀態 + 切割參數 + 版本號)"""
     files = []
     for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
         files.extend(glob.glob(os.path.join(folder_path, ext)))
@@ -176,8 +181,15 @@ def get_folder_fingerprint(folder_path):
     for f in files:
         stats = os.stat(f)
         state.append((os.path.basename(f), stats.st_mtime, stats.st_size))
-    # 加入 APP_VERSION 確保程式版本更新時也會觸發重建
-    return hashlib.md5((str(state) + APP_VERSION).encode()).hexdigest()
+    
+    # 將檔案狀態、切割參數與 APP_VERSION 組合在一起進行雜湊
+    combined_info = {
+        "files": state,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "app_version": APP_VERSION
+    }
+    return hashlib.md5(str(combined_info).encode()).hexdigest()
 
 # 根據設定初始化 Embedding 模型
 if USE_EMBED_PROVIDER == "openai":
@@ -186,7 +198,11 @@ else:
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
 
 # ===== 向量資料庫 (ChromaDB) 初始化 (具備自動更新功能) =====
-current_fingerprint = get_folder_fingerprint(folder)
+current_fingerprint = get_folder_fingerprint(
+    folder, 
+    config["vector_db"]["chunk_size"], 
+    config["vector_db"]["chunk_overlap"]
+)
 fingerprint_file = os.path.join(db_name, "fingerprint.txt")
 
 vectorstore = None
@@ -246,7 +262,10 @@ if rebuild_needed:
         doc.metadata["source"] = os.path.basename(doc.metadata.get("source", "unknown"))
 
     # 設定文件切割器
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config["vector_db"]["chunk_size"], 
+        chunk_overlap=config["vector_db"]["chunk_overlap"]
+    )
     chunks = text_splitter.split_documents(documents)
     print(f"Total documents: {len(documents)}, chunks: {len(chunks)}")
     
@@ -262,8 +281,8 @@ collection = vectorstore._collection
 sample_embedding = collection.get(limit=1, include=["embeddings"])["embeddings"][0]
 print(f"There are {collection.count():,} vectors with {len(sample_embedding):,} dimensions")
 
-# 建立檢索器 (Retriever)，設定每次找出最相似的 5 個文件片段 (k=5)
-retriever = vectorstore.as_retriever(search_kwargs = {"k":5})
+# 建立檢索器 (Retriever)，設定每次找出最相似的文件片段 (k 來自 config.yaml)
+retriever = vectorstore.as_retriever(search_kwargs = {"k": config["retriever"]["k"]})
 
 # ===== 建立對話核心鏈 (Chain) =====
 def build_chain(provider, model_id, prompt_key):
