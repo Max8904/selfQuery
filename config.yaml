@@ -2,8 +2,9 @@
 vector_db:
   chunk_size: 500       # 每個切片的最大字元數 (推薦 400~600)
   chunk_overlap: 100    # 相鄰切片的重疊長度 (推薦為 chunk_size 的 10-20%)
-  db_name: "personal_information_vector_db"
-  folder: "personal_information"
+  db_name: "vector_db"
+  folders:              # 支援多個資料夾路徑
+    - "personal_information"
 
 # 檢索與模型設定
 retriever:

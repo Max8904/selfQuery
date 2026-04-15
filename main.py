@@ -166,15 +166,18 @@ MODEL_CHOICES = {
 }
 DEFAULT_MODEL = config["chat"]["default_model"]
 
-# 設定文件資料夾與向量資料庫儲存的資料夾名稱
-folder = config["vector_db"]["folder"]
+# 設定文件資料夾 (支援列表) 與向量資料庫儲存的資料夾名稱
+folders = config["vector_db"]["folders"]
 db_name = config["vector_db"]["db_name"]
 
-def get_folder_fingerprint(folder_path, chunk_size, chunk_overlap):
-    """計算資料夾內容與切割設定的指紋 (檔案狀態 + 切割參數 + 版本號)"""
+def get_folder_fingerprint(folder_paths, chunk_size, chunk_overlap):
+    """計算多個資料夾內容與切割設定的指紋 (檔案狀態 + 切割參數 + 版本號)"""
     files = []
-    for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
-        files.extend(glob.glob(os.path.join(folder_path, ext)))
+    for folder_path in folder_paths:
+        if not os.path.exists(folder_path):
+            continue
+        for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
+            files.extend(glob.glob(os.path.join(folder_path, ext)))
     files.sort()
     
     state = []
@@ -182,7 +185,7 @@ def get_folder_fingerprint(folder_path, chunk_size, chunk_overlap):
         stats = os.stat(f)
         state.append((os.path.basename(f), stats.st_mtime, stats.st_size))
     
-    # 將檔案狀態、切割參數與 APP_VERSION 組合在一起進行雜湊
+    # 將所有檔案狀態、切割參數與 APP_VERSION 組合在一起進行雜湊
     combined_info = {
         "files": state,
         "chunk_size": chunk_size,
@@ -199,7 +202,7 @@ else:
 
 # ===== 向量資料庫 (ChromaDB) 初始化 (具備自動更新功能) =====
 current_fingerprint = get_folder_fingerprint(
-    folder, 
+    folders, 
     config["vector_db"]["chunk_size"], 
     config["vector_db"]["chunk_overlap"]
 )
@@ -215,13 +218,13 @@ if os.path.exists(db_name):
             last_fingerprint = f.read().strip()
         
         if last_fingerprint == current_fingerprint:
-            print("Detected no changes in source files. Loading existing vectorstore...")
+            print("Detected no changes in source files or settings. Loading existing vectorstore...")
             vectorstore = Chroma(persist_directory=db_name, embedding_function=embeddings)
             # 如果資料庫是空的，也需要重建
             if vectorstore._collection.count() == 0:
                 rebuild_needed = True
         else:
-            print("Detected changes in source files. Preparing to rebuild...")
+            print("Detected changes in source files or settings. Preparing to rebuild...")
             rebuild_needed = True
     else:
         print("Missing fingerprint file. Rebuilding for safety...")
@@ -246,14 +249,20 @@ if rebuild_needed:
     }
 
     documents = []
-    for glob_pattern, loader_cls in file_loaders.items():
-        try:
-            loader = DirectoryLoader(folder, glob=glob_pattern, loader_cls=loader_cls)
-            loaded_docs = loader.load()
-            documents.extend(loaded_docs)
-            print(f"Loaded {len(loaded_docs)} documents/pages matching {glob_pattern}")
-        except Exception as e:
-            print(f"Error loading {glob_pattern}: {e}")
+    for folder_path in folders:
+        if not os.path.exists(folder_path):
+            print(f"Warning: Folder not found: {folder_path}")
+            continue
+        print(f"Loading documents from: {folder_path}")
+        for glob_pattern, loader_cls in file_loaders.items():
+            try:
+                loader = DirectoryLoader(folder_path, glob=glob_pattern, loader_cls=loader_cls)
+                loaded_docs = loader.load()
+                documents.extend(loaded_docs)
+                if loaded_docs:
+                    print(f"  - Loaded {len(loaded_docs)} documents matching {glob_pattern}")
+            except Exception as e:
+                print(f"Error loading {glob_pattern} in {folder_path}: {e}")
     
     # 預處理：1. 將所有文件的頁碼 +1 (從 0-indexed 改為 1-indexed)，若無頁碼預設為 1
     #         2. 將 source 路徑清理為純檔名，避免 LLM 輸出完整路徑
