@@ -2,4 +2,6 @@
 personal_information/
 vector_db/
 log/
+
 .env
+note.txt
