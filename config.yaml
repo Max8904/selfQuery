@@ -5,6 +5,7 @@ vector_db:
   db_name: "vector_db"
   folders:              # 支援多個資料夾路徑
     - "personal_information"
+    - "D:/我的資料/求職/面試/面試相關資料/履歷相關資料"
 
 # 檢索與模型設定
 retriever:

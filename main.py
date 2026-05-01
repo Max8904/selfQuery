@@ -8,6 +8,7 @@ import glob
 import logging
 import re
 import hashlib
+import json
 import shutil
 import yaml
 from dotenv import load_dotenv
@@ -27,8 +28,8 @@ from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
 # 這個模板決定了 LLM 看到的每段參考資料長什麼樣子
 DOC_TEMPLATE = PromptTemplate(
-    template="---文件片段---\n檔案名稱: {source}\n頁碼: {page}\n內文: {page_content}",
-    input_variables=["page_content", "source", "page"]
+    template="---文件片段---\n資料夾: {source_folder}\n檔案名稱: {source}\n頁碼: {page}\n內文: {page_content}",
+    input_variables=["page_content", "source_folder", "source", "page"]
 )
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -170,29 +171,44 @@ DEFAULT_MODEL = config["chat"]["default_model"]
 folders = config["vector_db"]["folders"]
 db_name = config["vector_db"]["db_name"]
 
-def get_folder_fingerprint(folder_paths, chunk_size, chunk_overlap):
-    """計算多個資料夾內容與切割設定的指紋 (檔案狀態 + 切割參數 + 版本號)"""
-    files = []
+def get_chunk_settings_hash(chunk_size, chunk_overlap):
+    return hashlib.md5(f"{chunk_size}:{chunk_overlap}:{APP_VERSION}".encode()).hexdigest()
+
+def scan_files(folder_paths):
+    """掃描所有資料夾，回傳 {normalized_path: mtime+size hash} 字典"""
+    result = {}
     for folder_path in folder_paths:
         if not os.path.exists(folder_path):
             continue
         for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
-            files.extend(glob.glob(os.path.join(folder_path, ext)))
-    files.sort()
-    
-    state = []
-    for f in files:
-        stats = os.stat(f)
-        state.append((os.path.basename(f), stats.st_mtime, stats.st_size))
-    
-    # 將所有檔案狀態、切割參數與 APP_VERSION 組合在一起進行雜湊
-    combined_info = {
-        "files": state,
-        "chunk_size": chunk_size,
-        "chunk_overlap": chunk_overlap,
-        "app_version": APP_VERSION
-    }
-    return hashlib.md5(str(combined_info).encode()).hexdigest()
+            for f in glob.glob(os.path.join(folder_path, ext)):
+                f = os.path.normpath(f)
+                stats = os.stat(f)
+                result[f] = hashlib.md5(f"{stats.st_mtime}:{stats.st_size}".encode()).hexdigest()
+    return result
+
+FILE_LOADERS = {
+    ".pdf": PyMuPDFLoader,
+    ".pptx": UnstructuredPowerPointLoader,
+    ".docx": Docx2txtLoader,
+    ".xlsx": UnstructuredExcelLoader,
+    ".xls": UnstructuredExcelLoader,
+}
+
+def load_single_file(filepath):
+    """載入單一檔案並附加 source_folder、file_path、source、page metadata"""
+    ext = os.path.splitext(filepath)[1].lower()
+    loader_cls = FILE_LOADERS.get(ext)
+    if not loader_cls:
+        return []
+    docs = loader_cls(filepath).load()
+    folder_name = os.path.basename(os.path.dirname(os.path.abspath(filepath)))
+    for doc in docs:
+        doc.metadata["source_folder"] = folder_name
+        doc.metadata["file_path"] = filepath   # 增量刪除的 key
+        doc.metadata["page"] = doc.metadata.get("page", 0) + 1
+        doc.metadata["source"] = os.path.basename(filepath)
+    return docs
 
 # 根據設定初始化 Embedding 模型
 if USE_EMBED_PROVIDER == "openai":
@@ -200,91 +216,101 @@ if USE_EMBED_PROVIDER == "openai":
 else:
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
 
-# ===== 向量資料庫 (ChromaDB) 初始化 (具備自動更新功能) =====
-current_fingerprint = get_folder_fingerprint(
-    folders, 
-    config["vector_db"]["chunk_size"], 
-    config["vector_db"]["chunk_overlap"]
-)
-fingerprint_file = os.path.join(db_name, "fingerprint.txt")
+# ===== 向量資料庫 (ChromaDB) 初始化 (支援增量更新) =====
+chunk_size    = config["vector_db"]["chunk_size"]
+chunk_overlap = config["vector_db"]["chunk_overlap"]
+chunk_settings_hash = get_chunk_settings_hash(chunk_size, chunk_overlap)
+fingerprint_file = os.path.join(db_name, "file_fingerprints.json")
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+current_files = scan_files(folders)   # {filepath: hash}
 
-vectorstore = None
-rebuild_needed = False
+def _embed_and_add(filepaths, vs):
+    """載入指定檔案清單並 embed 加入向量庫"""
+    documents = []
+    for filepath in sorted(filepaths):
+        try:
+            docs = load_single_file(filepath)
+            documents.extend(docs)
+            print(f"  + {os.path.basename(filepath)}")
+        except Exception as e:
+            print(f"  ! Error loading {filepath}: {e}")
+    if documents:
+        chunks = text_splitter.split_documents(documents)
+        vs.add_documents(chunks)
+        print(f"  → {len(filepaths)} files, {len(chunks)} chunks embedded")
 
-if os.path.exists(db_name):
-    # 檢查指紋檔案是否存在且內容是否匹配
-    if os.path.exists(fingerprint_file):
-        with open(fingerprint_file, "r") as f:
-            last_fingerprint = f.read().strip()
-        
-        if last_fingerprint == current_fingerprint:
-            print("Detected no changes in source files or settings. Loading existing vectorstore...")
-            vectorstore = Chroma(persist_directory=db_name, embedding_function=embeddings)
-            # 如果資料庫是空的，也需要重建
-            if vectorstore._collection.count() == 0:
-                rebuild_needed = True
-        else:
-            print("Detected changes in source files or settings. Preparing to rebuild...")
-            rebuild_needed = True
-    else:
-        print("Missing fingerprint file. Rebuilding for safety...")
-        rebuild_needed = True
-else:
-    rebuild_needed = True
-
-if rebuild_needed:
-    # 如果資料庫已存在但需要重建，先刪除舊目錄以確保清理乾淨
+def _full_rebuild():
+    """完整重建向量資料庫"""
+    print("Building vectorstore from scratch...")
     if os.path.exists(db_name):
         shutil.rmtree(db_name)
-    
     os.makedirs(db_name, exist_ok=True)
-    
-    # 建立多種格式的載入器配置
-    file_loaders = {
-        "*.pdf": PyMuPDFLoader,
-        "*.pptx": UnstructuredPowerPointLoader,
-        "*.docx": Docx2txtLoader,
-        "*.xlsx": UnstructuredExcelLoader,
-        "*.xls": UnstructuredExcelLoader,
-    }
 
-    documents = []
-    for folder_path in folders:
-        if not os.path.exists(folder_path):
-            print(f"Warning: Folder not found: {folder_path}")
-            continue
-        print(f"Loading documents from: {folder_path}")
-        for glob_pattern, loader_cls in file_loaders.items():
+    # 按資料夾分組顯示載入進度
+    by_folder = {}
+    for fp in current_files:
+        folder = os.path.basename(os.path.dirname(os.path.abspath(fp)))
+        by_folder.setdefault(folder, []).append(fp)
+
+    all_docs = []
+    for folder, fps in sorted(by_folder.items()):
+        print(f"Loading documents from: {folder}")
+        for fp in sorted(fps):
             try:
-                loader = DirectoryLoader(folder_path, glob=glob_pattern, loader_cls=loader_cls)
-                loaded_docs = loader.load()
-                documents.extend(loaded_docs)
-                if loaded_docs:
-                    print(f"  - Loaded {len(loaded_docs)} documents matching {glob_pattern}")
+                docs = load_single_file(fp)
+                all_docs.extend(docs)
+                ext = os.path.splitext(fp)[1]
+                print(f"  - Loaded 1 files matching *{ext}")
             except Exception as e:
-                print(f"Error loading {glob_pattern} in {folder_path}: {e}")
-    
-    # 預處理：1. 將所有文件的頁碼 +1 (從 0-indexed 改為 1-indexed)，若無頁碼預設為 1
-    #         2. 將 source 路徑清理為純檔名，避免 LLM 輸出完整路徑
-    for doc in documents:
-        doc.metadata["page"] = doc.metadata.get("page", 0) + 1
-        doc.metadata["source"] = os.path.basename(doc.metadata.get("source", "unknown"))
+                print(f"  ! Error loading {fp}: {e}")
 
-    # 設定文件切割器
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config["vector_db"]["chunk_size"], 
-        chunk_overlap=config["vector_db"]["chunk_overlap"]
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"Total documents: {len(documents)}, chunks: {len(chunks)}")
-    
-    # 將切割好的文件區塊轉換成向量並存入本地端 ChromaDB
-    vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)
-    
-    # 寫入新指紋
-    with open(fingerprint_file, "w") as f:
-        f.write(current_fingerprint)
-    print(f"Vectorstore created/rebuilt with {vectorstore._collection.count()} chunks.")
+    chunks = text_splitter.split_documents(all_docs)
+    print(f"Total documents: {len(all_docs)}, chunks: {len(chunks)}")
+    vs = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)
+    _save_fingerprints()
+    print(f"Vectorstore created with {vs._collection.count()} chunks.")
+    return vs
+
+def _save_fingerprints():
+    with open(fingerprint_file, "w", encoding="utf-8") as f:
+        json.dump({"chunk_settings": chunk_settings_hash, "files": current_files}, f, indent=2)
+
+# ----- 主判斷邏輯 -----
+if not os.path.exists(db_name) or not os.path.exists(fingerprint_file):
+    vectorstore = _full_rebuild()
+else:
+    with open(fingerprint_file, encoding="utf-8") as f:
+        stored = json.load(f)
+
+    if stored.get("chunk_settings") != chunk_settings_hash:
+        print("Chunk settings or app version changed. Rebuilding...")
+        vectorstore = _full_rebuild()
+    else:
+        vectorstore = Chroma(persist_directory=db_name, embedding_function=embeddings)
+        if vectorstore._collection.count() == 0:
+            print("Empty vectorstore detected. Rebuilding...")
+            vectorstore = _full_rebuild()
+        else:
+            stored_files = stored.get("files", {})
+            new_or_modified = {p for p, h in current_files.items() if stored_files.get(p) != h}
+            deleted        = {p for p in stored_files if p not in current_files}
+
+            if not new_or_modified and not deleted:
+                print("No changes detected. Loading existing vectorstore...")
+            else:
+                print(f"Incremental update: {len(new_or_modified)} modified, {len(deleted)} deleted")
+                # 先刪除異動或已移除檔案的舊 chunks
+                for filepath in deleted | new_or_modified:
+                    try:
+                        vectorstore._collection.delete(where={"file_path": filepath})
+                        print(f"  - Removed chunks: {os.path.basename(filepath)}")
+                    except Exception as e:
+                        print(f"  ! Could not remove {filepath}: {e}")
+                # 再 embed 新增或異動的檔案
+                if new_or_modified:
+                    _embed_and_add(new_or_modified, vectorstore)
+                _save_fingerprints()
+                print(f"Vectorstore updated. Total chunks: {vectorstore._collection.count()}")
 
 collection = vectorstore._collection
 sample_embedding = collection.get(limit=1, include=["embeddings"])["embeddings"][0]
@@ -347,22 +373,24 @@ def chat(message, _history, model_name):
     reference_list = []
     seen_refs = set()
     for i, doc in enumerate(result.get("source_documents", []), 1):
-        source = os.path.basename(doc.metadata.get("source", "unknown"))
+        source = doc.metadata.get("source", "unknown")
         # 由於我們在存入資料庫前已經將頁碼 +1，這裡直接讀取即可
-        page = doc.metadata.get("page", 1) 
-        
+        page = doc.metadata.get("page", 1)
+        folder = doc.metadata.get("source_folder", "")
+
         # 取得一小段預覽內容 (移除換行並取前 60 字)
         snippet = doc.page_content.replace('\n', ' ').strip()[:60]
-        
+
         # 建立唯一標識，避免重複列出完全相同的來源頁面
-        ref_id = f"{source}, {page}"
+        folder_prefix = f"[{folder}] " if folder else ""
+        ref_id = f"{folder_prefix}{source}, 第{page}頁"
         if ref_id not in seen_refs:
-            # 套用與文內引用一致的樣式 **`[檔名, 頁碼]`**
+            # 套用與文內引用一致的樣式 **`[資料夾] 檔名, 頁碼`**
             styled_ref = f"**`[{ref_id}]`**"
             reference_list.append(f"{styled_ref} {snippet}...")
             seen_refs.add(ref_id)
-            
-        logger.info("文件 [%d] | 來源: %s (頁: %s) | 內容: %s...", i, source, page, snippet[:40])
+
+        logger.info("文件 [%d] | 資料夾: %s | 來源: %s (頁: %s) | 內容: %s...", i, folder, source, page, snippet[:40])
 
     # 移除模型回答結尾可能存在的多餘換行
     answer_text = result["answer"].strip()
