@@ -175,13 +175,13 @@ def get_chunk_settings_hash(chunk_size, chunk_overlap):
     return hashlib.md5(f"{chunk_size}:{chunk_overlap}:{APP_VERSION}".encode()).hexdigest()
 
 def scan_files(folder_paths):
-    """掃描所有資料夾，回傳 {normalized_path: mtime+size hash} 字典"""
+    """遞迴掃描所有資料夾及子資料夾，回傳 {normalized_path: mtime+size hash} 字典"""
     result = {}
     for folder_path in folder_paths:
         if not os.path.exists(folder_path):
             continue
         for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
-            for f in glob.glob(os.path.join(folder_path, ext)):
+            for f in glob.glob(os.path.join(folder_path, "**", ext), recursive=True):
                 f = os.path.normpath(f)
                 stats = os.stat(f)
                 result[f] = hashlib.md5(f"{stats.st_mtime}:{stats.st_size}".encode()).hexdigest()
@@ -202,7 +202,7 @@ def load_single_file(filepath):
     if not loader_cls:
         return []
     docs = loader_cls(filepath).load()
-    folder_name = os.path.basename(os.path.dirname(os.path.abspath(filepath)))
+    folder_name = os.path.relpath(os.path.dirname(os.path.abspath(filepath)))
     for doc in docs:
         doc.metadata["source_folder"] = folder_name
         doc.metadata["file_path"] = filepath   # 增量刪除的 key
@@ -249,7 +249,7 @@ def _full_rebuild():
     # 按資料夾分組顯示載入進度
     by_folder = {}
     for fp in current_files:
-        folder = os.path.basename(os.path.dirname(os.path.abspath(fp)))
+        folder = os.path.relpath(os.path.dirname(os.path.abspath(fp)))
         by_folder.setdefault(folder, []).append(fp)
 
     all_docs = []

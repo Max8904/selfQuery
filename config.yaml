@@ -4,7 +4,7 @@ vector_db:
   chunk_overlap: 100    # 相鄰切片的重疊長度 (推薦為 chunk_size 的 10-20%)
   db_name: "vector_db"
   folders:              # 支援多個資料夾路徑
-    - "personal_information"
+    - "D:/我的資料/求職/面試/自我介紹"
     - "D:/我的資料/求職/面試/面試相關資料/履歷相關資料"
 
 # 檢索與模型設定
