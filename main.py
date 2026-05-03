@@ -21,7 +21,7 @@ if hasattr(sys.stderr, 'reconfigure') and sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
 # ===== LangChain 生態系、圖表與向量資料庫載入 =====
-from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader, UnstructuredPowerPointLoader, Docx2txtLoader, UnstructuredExcelLoader
+from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader, UnstructuredPowerPointLoader, Docx2txtLoader, UnstructuredExcelLoader, UnstructuredImageLoader
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
@@ -180,19 +180,24 @@ def scan_files(folder_paths):
     for folder_path in folder_paths:
         if not os.path.exists(folder_path):
             continue
-        for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls"]:
+        for ext in ["*.pdf", "*.pptx", "*.docx", "*.xlsx", "*.xls", "*.txt", "*.jpg", "*.jpeg"]:
             for f in glob.glob(os.path.join(folder_path, "**", ext), recursive=True):
                 f = os.path.normpath(f)
                 stats = os.stat(f)
                 result[f] = hashlib.md5(f"{stats.st_mtime}:{stats.st_size}".encode()).hexdigest()
     return result
 
+_ocr_langs = config["vector_db"].get("languages", ["eng"])
+
 FILE_LOADERS = {
-    ".pdf": PyMuPDFLoader,
-    ".pptx": UnstructuredPowerPointLoader,
+    ".pdf":  PyMuPDFLoader,
+    ".pptx": lambda fp: UnstructuredPowerPointLoader(fp, languages=_ocr_langs),
     ".docx": Docx2txtLoader,
-    ".xlsx": UnstructuredExcelLoader,
-    ".xls": UnstructuredExcelLoader,
+    ".xlsx": lambda fp: UnstructuredExcelLoader(fp, languages=_ocr_langs),
+    ".xls":  lambda fp: UnstructuredExcelLoader(fp, languages=_ocr_langs),
+    ".txt":  lambda fp: TextLoader(fp, autodetect_encoding=True),
+    ".jpg":  lambda fp: UnstructuredImageLoader(fp, languages=_ocr_langs),
+    ".jpeg": lambda fp: UnstructuredImageLoader(fp, languages=_ocr_langs),
 }
 
 def load_single_file(filepath):
@@ -202,6 +207,9 @@ def load_single_file(filepath):
     if not loader_cls:
         return []
     docs = loader_cls(filepath).load()
+    docs = [d for d in docs if d.page_content and d.page_content.strip()]
+    if not docs:
+        return []
     folder_name = os.path.relpath(os.path.dirname(os.path.abspath(filepath)))
     for doc in docs:
         doc.metadata["source_folder"] = folder_name
@@ -224,6 +232,15 @@ fingerprint_file = os.path.join(db_name, "file_fingerprints.json")
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 current_files = scan_files(folders)   # {filepath: hash}
 
+_type_counts = {}
+for _fp in current_files:
+    _ext = os.path.splitext(_fp)[1].lower()
+    _type_counts[_ext] = _type_counts.get(_ext, 0) + 1
+if _type_counts:
+    print("Files found: " + ", ".join(f"{cnt} {ext}" for ext, cnt in sorted(_type_counts.items())))
+else:
+    print("Files found: (none)")
+
 def _embed_and_add(filepaths, vs):
     """載入指定檔案清單並 embed 加入向量庫"""
     documents = []
@@ -233,7 +250,7 @@ def _embed_and_add(filepaths, vs):
             documents.extend(docs)
             print(f"  + {os.path.basename(filepath)}")
         except Exception as e:
-            print(f"  ! Error loading {filepath}: {e}")
+            print(f"  ! Error loading {filepath}: {repr(e)}")
     if documents:
         chunks = text_splitter.split_documents(documents)
         vs.add_documents(chunks)
@@ -262,7 +279,7 @@ def _full_rebuild():
                 ext = os.path.splitext(fp)[1]
                 print(f"  - Loaded 1 files matching *{ext}")
             except Exception as e:
-                print(f"  ! Error loading {fp}: {e}")
+                print(f"  ! Error loading {fp}: {repr(e)}")
 
     chunks = text_splitter.split_documents(all_docs)
     print(f"Total documents: {len(all_docs)}, chunks: {len(chunks)}")

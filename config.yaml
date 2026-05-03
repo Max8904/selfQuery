@@ -3,6 +3,7 @@ vector_db:
   chunk_size: 500       # 每個切片的最大字元數 (推薦 400~600)
   chunk_overlap: 100    # 相鄰切片的重疊長度 (推薦為 chunk_size 的 10-20%)
   db_name: "vector_db"
+  languages: ["chi_tra", "eng"]  # OCR 語言設定（Tesseract 代碼，影響 PPTX/XLSX/JPG）
   folders:              # 支援多個資料夾路徑
     - "D:/我的資料/求職/面試/自我介紹"
     - "D:/我的資料/求職/面試/面試相關資料/履歷相關資料"
