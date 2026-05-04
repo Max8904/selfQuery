@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /d \"D:\\\\LLM\\\\selfQuery\")",
+      "Bash(conda run *)",
+      "PowerShell(conda run -n selfQuery pip install rank_bm25 2>&1)",
+      "PowerShell(conda run -n selfQuery python -c \"import langchain; print\\(langchain.__version__\\)\")"
+    ]
+  }
+}

@@ -43,6 +43,8 @@ import plotly.graph_objects as go
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
 
 load_dotenv()
 
@@ -334,7 +336,30 @@ sample_embedding = collection.get(limit=1, include=["embeddings"])["embeddings"]
 print(f"There are {collection.count():,} vectors with {len(sample_embedding):,} dimensions")
 
 # 建立檢索器 (Retriever)，設定每次找出最相似的文件片段 (k 來自 config.yaml)
-retriever = vectorstore.as_retriever(search_kwargs = {"k": config["retriever"]["k"]})
+def build_retriever(vs):
+    k = config["retriever"]["k"]
+    vector_ret = vs.as_retriever(search_kwargs={"k": k})
+
+    if not config["retriever"].get("hybrid_search", False):
+        return vector_ret
+
+    raw = vs._collection.get(include=["documents", "metadatas"])
+    docs_for_bm25 = [
+        Document(page_content=text, metadata=meta)
+        for text, meta in zip(raw["documents"], raw["metadatas"])
+    ]
+
+    if not docs_for_bm25:
+        logger.warning("BM25: ChromaDB 無文件，退回純向量檢索。")
+        return vector_ret
+
+    bm25_ret = BM25Retriever.from_documents(docs_for_bm25, k=k)
+    bw = config["retriever"].get("bm25_weight", 0.5)
+    vw = config["retriever"].get("vector_weight", 0.5)
+    logger.info("Hybrid search 已啟用: BM25=%.2f, vector=%.2f, k=%d", bw, vw, k)
+    return EnsembleRetriever(retrievers=[bm25_ret, vector_ret], weights=[bw, vw])
+
+retriever = build_retriever(vectorstore)
 
 # ===== 建立對話核心鏈 (Chain) =====
 def build_chain(provider, model_id, prompt_key):

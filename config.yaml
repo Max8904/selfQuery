@@ -11,6 +11,9 @@ vector_db:
 # 檢索與模型設定
 retriever:
   k: 5                  # 每次檢索回傳的片段數量 (推薦 3~7)
+  hybrid_search: true   # 啟用 BM25 + 向量混合檢索
+  bm25_weight: 0.5      # BM25 關鍵字權重
+  vector_weight: 0.5    # 向量語意權重
 
 # 聊天介面設定
 chat:
